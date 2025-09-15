@@ -1,21 +1,29 @@
 import 'dotenv/config';
 import axios from 'axios';
-import Dlive from 'dlivetv-api';
+import WebSocket from 'ws';
+
+/**
+ * DLive chat bot WITHOUT AUTH KEY.
+ * - Resolves channel -> streamer username via public GraphQL POST
+ * - Opens WS 'graphql-ws' to graphigostream.prd.dlive.tv
+ * - Subscribes to StreamMessageSubscription
+ * - On ChatText matching !call "slot", POSTs to your endpoint (with fallback GET)
+ *
+ * DISCLAIMER: Uses **unofficial** endpoints/protocol; may break if DLive changes.
+ */
 
 // ---- Config ----
-const AUTH_KEY = process.env.DLIVE_AUTH_KEY;
-const CHANNEL = process.env.DLIVE_CHANNEL; // ex: MonChannel
+const CHANNEL_DISPLAY = process.env.DLIVE_CHANNEL; // ex: FuturFormatic (as seen in URL)
 const BASE_URL = (process.env.CALLS_BASE_URL || '').replace(/\/$/, '');
 const ENDPOINT = process.env.CALLS_ENDPOINT || '/api/calls';
 const SHARED = process.env.CALLS_SHARED_SECRET || '';
 
-if (!AUTH_KEY || !CHANNEL || !BASE_URL) {
-  console.error('[config] DLIVE_AUTH_KEY, DLIVE_CHANNEL et CALLS_BASE_URL sont requis');
+if (!CHANNEL_DISPLAY || !BASE_URL) {
+  console.error('[config] DLIVE_CHANNEL et CALLS_BASE_URL sont requis');
   process.exit(1);
 }
 
-// ---- Utilitaires ----
-// !call "ma slot"  ou  !call 'ma slot'
+// ---- Helpers ----
 const CALL_CMD = /^!call\s+([\"'])(?<slot>[^\1]{1,80})\1\s*$/i;
 
 function parseCallCommand(text) {
@@ -42,39 +50,102 @@ async function sendCall(slot, user) {
   }
 }
 
-// ---- Bot DLive ----
-const bot = new Dlive(AUTH_KEY, CHANNEL);
-
-bot.on('ready', () => {
-  console.log(`[dlive] Connecté sur #${CHANNEL}`);
-});
-
-bot.on('ChatText', async (msg) => {
-  try {
-    const text = (msg?.content || '').trim();
-    const displayName = msg?.sender?.displayname || msg?.sender?.username || 'inconnu';
-
-    const slot = parseCallCommand(text);
-    if (!slot) return; // on ignore les autres messages
-
-    const result = await sendCall(slot, displayName);
-
-    if (result.ok) {
-      const mode = result.fallback ? 'GET' : 'POST';
-      bot.sendMessage(`✅ Call ajouté pour « ${slot} » par ${displayName} (${mode}).`);
-    } else {
-      bot.sendMessage(`❌ Impossible d'ajouter le call (« ${slot} »).`);
-      console.error('[calls] erreur:', result.error);
+// Resolve displayname -> username (streamer)
+async function resolveStreamer(displayname) {
+  const query = {
+    operationName: "LivestreamPage",
+    variables: {
+      displayname,
+      add: false,
+      isLoggedIn: false,
+      isMe: false,
+      showUnpicked: false,
+      order: "PickTime"
+    },
+    extensions: {
+      persistedQuery: { version: 1, sha256Hash: "2e6216b014c465c64e5796482a3078c7ec7fbc2742d93b072c03f523dbcf71e2" }
     }
+  };
+  const res = await fetch("https://graphigo.prd.dlive.tv/", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(query)
+  });
+  if (!res.ok) throw new Error(`Graphigo HTTP ${res.status}`);
+  const data = await res.json();
+  const username = data?.data?.userByDisplayName?.username;
+  if (!username) throw new Error(`Channel "${displayname}" introuvable`);
+  return username;
+}
+
+// Subscribe to chat via WS
+function subscribeChat(streamer, onMessage) {
+  const ws = new WebSocket("wss://graphigostream.prd.dlive.tv/", "graphql-ws");
+
+  ws.on("open", () => {
+    console.log(`[dlive] WS ouvert pour ${streamer}`);
+    ws.send(JSON.stringify({ type: "connection_init", payload: {} }));
+
+    // start subscription (messages)
+    ws.send(JSON.stringify({
+      id: "2",
+      type: "start",
+      payload: {
+        variables: { streamer, viewer: "" },
+        extensions: { persistedQuery: { version: 1, sha256Hash: "1246db4612a2a1acc520afcbd34684cdbcebad35bcfff29dcd7916a247722a7a" } },
+        operationName: "StreamMessageSubscription",
+        query: "subscription StreamMessageSubscription($streamer: String!, $viewer: String) { streamMessageReceived(streamer: $streamer, viewer: $viewer) { type ... on ChatText { id emojis content createdAt subLength ...VStreamChatSenderInfoFrag __typename } ... on ChatGift { id gift amount message recentCount expireDuration ...VStreamChatSenderInfoFrag __typename } ... on ChatFollow { id ...VStreamChatSenderInfoFrag __typename } ... on ChatHost { id viewer ...VStreamChatSenderInfoFrag __typename } ... on ChatSubscription { id month ...VStreamChatSenderInfoFrag __typename } ... on ChatExtendSub { id month length ...VStreamChatSenderInfoFrag __typename } ... on ChatChangeMode { mode __typename } ... on ChatSubStreak { id ...VStreamChatSenderInfoFrag length __typename } ... on ChatClip { id url ...VStreamChatSenderInfoFrag __typename } ... on ChatDelete { ids __typename } ... on ChatBan { id ...VStreamChatSenderInfoFrag bannedBy { id displayname __typename } bannedByRoomRole __typename } ... on ChatModerator { id ...VStreamChatSenderInfoFrag add __typename } ... on ChatEmoteAdd { id ...VStreamChatSenderInfoFrag emote __typename } ... on ChatTimeout { id ...VStreamChatSenderInfoFrag minute bannedBy { id displayname __typename } bannedByRoomRole __typename } ... on ChatTCValueAdd { id ...VStreamChatSenderInfoFrag amount totalAmount __typename } ... on ChatGiftSub { id ...VStreamChatSenderInfoFrag count receiver __typename } ... on ChatGiftSubReceive { id ...VStreamChatSenderInfoFrag gifter __typename } __typename } } fragment VStreamChatSenderInfoFrag on SenderInfo { subscribing role roomRole sender { id username displayname avatar partnerStatus badges effect __typename } __typename }"
+      }
+    }));
+  });
+
+  ws.on("message", (buf) => {
+    try {
+      const data = JSON.parse(buf.toString());
+      if (data.type === "connection_ack" || data.type === "ka") return;
+      const msg = data?.payload?.data?.streamMessageReceived?.[0];
+      if (!msg) return;
+      onMessage(msg);
+    } catch (e) {
+      console.error("[ws] parse error:", e);
+    }
+  });
+
+  ws.on("error", (e) => {
+    console.error("[ws] erreur:", e?.message || e);
+  });
+
+  ws.on("close", (code) => {
+    console.log(`[ws] fermé (${code}). Reconnexion dans 5s...`);
+    setTimeout(() => subscribeChat(streamer, onMessage), 5000);
+  });
+
+  return ws;
+}
+
+(async () => {
+  try {
+    const streamer = await resolveStreamer(CHANNEL_DISPLAY);
+    console.log(`[dlive] Channel ${CHANNEL_DISPLAY} -> streamer username: ${streamer}`);
+
+    subscribeChat(streamer, async (msg) => {
+      if (msg?.type === "Message" && msg.__typename === "ChatText") {
+        const text = (msg?.content || "").trim();
+        const displayName = msg?.sender?.displayname || msg?.sender?.username || "inconnu";
+        const slot = parseCallCommand(text);
+        if (!slot) return;
+
+        const result = await sendCall(slot, displayName);
+        if (result.ok) {
+          const mode = result.fallback ? 'GET' : 'POST';
+          console.log(`✅ Call ajouté pour « ${slot} » par ${displayName} (${mode}).`);
+        } else {
+          console.log(`❌ Ajout impossible (« ${slot} ») — ${result.error}`);
+        }
+      }
+    });
   } catch (e) {
-    console.error('[ChatText] erreur:', e);
+    console.error("[init] erreur:", e?.message || e);
+    process.exit(1);
   }
-});
-
-bot.on('close', () => {
-  console.log('[dlive] connexion fermée');
-});
-
-bot.on('error', (err) => {
-  console.error('[dlive] erreur:', err);
-});
+})();
