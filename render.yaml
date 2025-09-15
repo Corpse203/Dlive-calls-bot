@@ -1,0 +1,20 @@
+services:
+  - type: worker
+    name: dlive-calls-bot
+    env: node
+    plan: starter
+    autoDeploy: true
+    buildCommand: |
+      npm ci --omit=dev
+    startCommand: node index.js
+    envVars:
+      - key: DLIVE_AUTH_KEY
+        sync: false
+      - key: DLIVE_CHANNEL
+        sync: false
+      - key: CALLS_BASE_URL
+        value: https://calls-bot.onrender.com
+      - key: CALLS_ENDPOINT
+        value: /api/calls
+      - key: CALLS_SHARED_SECRET
+        sync: false
