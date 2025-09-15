@@ -15,7 +15,8 @@ if (!AUTH_KEY || !CHANNEL || !BASE_URL) {
 }
 
 // ---- Utilitaires ----
-const CALL_CMD = /^!call\s+([\"'])(?<slot>[^\1]{1,80})\1\s*$/i; // !call "slot" ou !call 'slot'
+// !call "ma slot"  ou  !call 'ma slot'
+const CALL_CMD = /^!call\s+([\"'])(?<slot>[^\1]{1,80})\1\s*$/i;
 
 function parseCallCommand(text) {
   const m = text.match(CALL_CMD);
@@ -31,7 +32,6 @@ async function sendCall(slot, user) {
     const res = await axios.post(url, payload, { timeout: 10_000 });
     return { ok: true, status: res.status, data: res.data };
   } catch (err) {
-    // Tentative de fallback en GET si le POST échoue (utile si votre backend attend une query-string)
     try {
       const params = new URLSearchParams({ slot, user, ...(SHARED ? { auth: SHARED } : {}) });
       const res2 = await axios.get(`${url}?${params.toString()}`, { timeout: 10_000 });
