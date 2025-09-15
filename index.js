@@ -24,7 +24,8 @@ if (!CHANNEL_DISPLAY || !BASE_URL) {
 }
 
 // ---- Helpers ----
-const CALL_CMD = /^!call\s+([\"'])(?<slot>[^\1]{1,80})\1\s*$/i;
+// accepte soit !call "slot", soit !call 'slot', soit !call slot
+const CALL_CMD = /^!call\s+(?:["'](?<slot>[^"']{1,80})["']|(?<slot>\S.+))$/i;
 
 function parseCallCommand(text) {
   const m = text.match(CALL_CMD);
