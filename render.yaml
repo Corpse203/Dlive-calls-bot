@@ -2,12 +2,14 @@ services:
   - type: worker
     name: dlive-calls-bot
     env: node
-    plan: starter
     autoDeploy: true
+    plan: starter
     buildCommand: |
-      npm ci --omit=dev
+      npm ci --omit=dev || npm i --omit=dev
     startCommand: node index.js
     envVars:
+      - key: NODE_VERSION
+        value: 18.20.4
       - key: DLIVE_AUTH_KEY
         sync: false
       - key: DLIVE_CHANNEL
