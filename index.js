@@ -24,12 +24,13 @@ if (!CHANNEL_DISPLAY || !BASE_URL) {
 }
 
 // ---- Helpers ----
-// accepte soit !call "slot", soit !call 'slot', soit !call slot
-const CALL_CMD = /^!call\s+(?:["'](?<slot>[^"']{1,80})["']|(?<slot>\S.+))$/i;
+// accepte !call "slot", !call 'slot' ou !call slot
+const CALL_CMD = /^!call\s+(?:(["'])(?<slotQuoted>[^"']{1,80})\1|(?<slotBare>\S.+))$/i;
 
 function parseCallCommand(text) {
   const m = text.match(CALL_CMD);
-  return m?.groups?.slot?.trim();
+  if (!m) return null;
+  return (m.groups.slotQuoted || m.groups.slotBare || "").trim();
 }
 
 async function sendCall(slot, user) {
