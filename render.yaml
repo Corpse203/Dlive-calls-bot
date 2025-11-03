@@ -4,8 +4,8 @@ services:
     env: node
     autoDeploy: true
     plan: starter
-    buildCommand: |
-      npm ci --omit=dev || npm i --omit=dev
+buildCommand: npm install --omit=dev
+
     startCommand: node index.js
     envVars:
       - key: NODE_VERSION
