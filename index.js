@@ -3,17 +3,17 @@ import axios from 'axios';
 import WebSocket from 'ws';
 
 /**
- * DLive chat bot WITHOUT AUTH KEY.
- * - Resolves channel -> streamer username via public GraphQL POST
- * - Opens WS 'graphql-ws' to graphigostream.prd.dlive.tv
- * - Subscribes to StreamMessageSubscription
- * - On ChatText matching !call "slot", POSTs to your endpoint (with fallback GET)
+ * DLive chat bot sans AUTH
+ * - Connexion directe au WebSocket "graphigostream.prd.dlive.tv"
+ * - Surveille les messages du chat du streamer défini dans DLIVE_CHANNEL
+ * - Détecte les commandes !call "slot" et les envoie à ton site
+ * - Reconnexion automatique si le WS se ferme
  *
- * DISCLAIMER: Uses **unofficial** endpoints/protocol; may break if DLive changes.
+ * ✅ Simple, aucun token requis
  */
 
 // ---- Config ----
-const CHANNEL_DISPLAY = process.env.DLIVE_CHANNEL; // ex: FuturFormatic (as seen in URL)
+const CHANNEL_DISPLAY = process.env.DLIVE_CHANNEL; // ex: Skrymi
 const BASE_URL = (process.env.CALLS_BASE_URL || '').replace(/\/$/, '');
 const ENDPOINT = process.env.CALLS_ENDPOINT || '/api/calls';
 const SHARED = process.env.CALLS_SHARED_SECRET || '';
@@ -52,35 +52,7 @@ async function sendCall(slot, user) {
   }
 }
 
-// Resolve displayname -> username (streamer)
-async function resolveStreamer(displayname) {
-  const query = {
-    operationName: "LivestreamPage",
-    variables: {
-      displayname,
-      add: false,
-      isLoggedIn: false,
-      isMe: false,
-      showUnpicked: false,
-      order: "PickTime"
-    },
-    extensions: {
-      persistedQuery: { version: 1, sha256Hash: "2e6216b014c465c64e5796482a3078c7ec7fbc2742d93b072c03f523dbcf71e2" }
-    }
-  };
-  const res = await fetch("https://graphigo.prd.dlive.tv/", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(query)
-  });
-  if (!res.ok) throw new Error(`Graphigo HTTP ${res.status}`);
-  const data = await res.json();
-  const username = data?.data?.userByDisplayName?.username;
-  if (!username) throw new Error(`Channel "${displayname}" introuvable`);
-  return username;
-}
-
-// Subscribe to chat via WS
+// ---- Connexion au chat via WebSocket ----
 function subscribeChat(streamer, onMessage) {
   const ws = new WebSocket("wss://graphigostream.prd.dlive.tv/", "graphql-ws");
 
@@ -88,15 +60,32 @@ function subscribeChat(streamer, onMessage) {
     console.log(`[dlive] WS ouvert pour ${streamer}`);
     ws.send(JSON.stringify({ type: "connection_init", payload: {} }));
 
-    // start subscription (messages)
+    // abonnement aux messages du chat
     ws.send(JSON.stringify({
       id: "2",
       type: "start",
       payload: {
         variables: { streamer, viewer: "" },
-        extensions: { persistedQuery: { version: 1, sha256Hash: "1246db4612a2a1acc520afcbd34684cdbcebad35bcfff29dcd7916a247722a7a" } },
+        extensions: {
+          persistedQuery: {
+            version: 1,
+            sha256Hash: "1246db4612a2a1acc520afcbd34684cdbcebad35bcfff29dcd7916a247722a7a"
+          }
+        },
         operationName: "StreamMessageSubscription",
-        query: "subscription StreamMessageSubscription($streamer: String!, $viewer: String) { streamMessageReceived(streamer: $streamer, viewer: $viewer) { type ... on ChatText { id emojis content createdAt subLength ...VStreamChatSenderInfoFrag __typename } ... on ChatGift { id gift amount message recentCount expireDuration ...VStreamChatSenderInfoFrag __typename } ... on ChatFollow { id ...VStreamChatSenderInfoFrag __typename } ... on ChatHost { id viewer ...VStreamChatSenderInfoFrag __typename } ... on ChatSubscription { id month ...VStreamChatSenderInfoFrag __typename } ... on ChatExtendSub { id month length ...VStreamChatSenderInfoFrag __typename } ... on ChatChangeMode { mode __typename } ... on ChatSubStreak { id ...VStreamChatSenderInfoFrag length __typename } ... on ChatClip { id url ...VStreamChatSenderInfoFrag __typename } ... on ChatDelete { ids __typename } ... on ChatBan { id ...VStreamChatSenderInfoFrag bannedBy { id displayname __typename } bannedByRoomRole __typename } ... on ChatModerator { id ...VStreamChatSenderInfoFrag add __typename } ... on ChatEmoteAdd { id ...VStreamChatSenderInfoFrag emote __typename } ... on ChatTimeout { id ...VStreamChatSenderInfoFrag minute bannedBy { id displayname __typename } bannedByRoomRole __typename } ... on ChatTCValueAdd { id ...VStreamChatSenderInfoFrag amount totalAmount __typename } ... on ChatGiftSub { id ...VStreamChatSenderInfoFrag count receiver __typename } ... on ChatGiftSubReceive { id ...VStreamChatSenderInfoFrag gifter __typename } __typename } } fragment VStreamChatSenderInfoFrag on SenderInfo { subscribing role roomRole sender { id username displayname avatar partnerStatus badges effect __typename } __typename }"
+        query: `subscription StreamMessageSubscription($streamer: String!, $viewer: String) {
+          streamMessageReceived(streamer: $streamer, viewer: $viewer) {
+            type
+            ... on ChatText {
+              id
+              emojis
+              content
+              createdAt
+              sender { username displayname }
+              __typename
+            }
+          }
+        }`
       }
     }));
   });
@@ -125,10 +114,12 @@ function subscribeChat(streamer, onMessage) {
   return ws;
 }
 
+// ---- Lancement ----
 (async () => {
   try {
-    const streamer = await resolveStreamer(CHANNEL_DISPLAY);
-    console.log(`[dlive] Channel ${CHANNEL_DISPLAY} -> streamer username: ${streamer}`);
+    // On saute la résolution GraphQL et on prend directement le nom du channel
+    const streamer = CHANNEL_DISPLAY.toLowerCase();
+    console.log(`[dlive] streamer forcé: ${streamer}`);
 
     subscribeChat(streamer, async (msg) => {
       if (msg?.type === "Message" && msg.__typename === "ChatText") {
