@@ -9,7 +9,7 @@ buildCommand: npm install --omit=dev
     startCommand: node index.js
     envVars:
       - key: NODE_VERSION
-        value: 18.20.4
+        value: 20.18.0
       - key: DLIVE_CHANNEL
         sync: false
       - key: CALLS_BASE_URL
